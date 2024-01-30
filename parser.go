@@ -15543,6 +15543,7 @@ yynewstate:
 			s := yyS[yypt-0].statement
 			if lexer, ok := yylex.(stmtTexter); ok {
 				s.SetText(lexer.stmtText())
+				s.SetStartLine(lexer.startLine())
 			}
 			parser.result = append(parser.result, s)
 		}
@@ -15552,6 +15553,7 @@ yynewstate:
 			s := yyS[yypt-0].statement
 			if lexer, ok := yylex.(stmtTexter); ok {
 				s.SetText(lexer.stmtText())
+				s.SetStartLine(lexer.startLine())
 			}
 			parser.result = append(parser.result, s)
 		}

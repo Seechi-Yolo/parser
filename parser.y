@@ -9583,6 +9583,7 @@ StatementList:
 			s := $1
 			if lexer, ok := yylex.(stmtTexter); ok {
 				s.SetText(lexer.stmtText())
+				s.SetStartLine(lexer.startLine())
 			}
 			parser.result = append(parser.result, s)
 		}
@@ -9593,6 +9594,7 @@ StatementList:
 			s := $3
 			if lexer, ok := yylex.(stmtTexter); ok {
 				s.SetText(lexer.stmtText())
+				s.SetStartLine(lexer.startLine())
 			}
 			parser.result = append(parser.result, s)
 		}
