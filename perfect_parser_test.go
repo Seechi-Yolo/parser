@@ -656,3 +656,254 @@ func TestIndexConstraint(t *testing.T) {
 		}
 	}
 }
+
+func TestGeometryColumnIsNotReserved(t *testing.T) {
+	parser := parser.New()
+	type testCase struct {
+		sql       string
+		formatSQL string
+		noError   bool
+		errMsg    string
+	}
+
+	tc := []testCase{
+		// point
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,point INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,point INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT point FROM t`,
+			formatSQL: `SELECT point FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (point) VALUES (1)`,
+			formatSQL: `INSERT INTO t (point) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET point=1`,
+			formatSQL: `UPDATE t SET point=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE point=1`,
+			formatSQL: `DELETE FROM t WHERE point=1`,
+			noError:   true,
+		},
+		// geometry
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,geometry INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,geometry INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT geometry FROM t`,
+			formatSQL: `SELECT geometry FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (geometry) VALUES (1)`,
+			formatSQL: `INSERT INTO t (geometry) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET geometry=1`,
+			formatSQL: `UPDATE t SET geometry=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE geometry=1`,
+			formatSQL: `DELETE FROM t WHERE geometry=1`,
+			noError:   true,
+		},
+		// LINESTRING
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,linestring INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,linestring INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT linestring FROM t`,
+			formatSQL: `SELECT linestring FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (linestring) VALUES (1)`,
+			formatSQL: `INSERT INTO t (linestring) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET linestring=1`,
+			formatSQL: `UPDATE t SET linestring=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE linestring=1`,
+			formatSQL: `DELETE FROM t WHERE linestring=1`,
+			noError:   true,
+		},
+		// POLYGON
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,polygon INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,polygon INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT polygon FROM t`,
+			formatSQL: `SELECT polygon FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (polygon) VALUES (1)`,
+			formatSQL: `INSERT INTO t (polygon) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET polygon=1`,
+			formatSQL: `UPDATE t SET polygon=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE polygon=1`,
+			formatSQL: `DELETE FROM t WHERE polygon=1`,
+			noError:   true,
+		},
+		// MULTIPOINT
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,multipoint INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,multipoint INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT multipoint FROM t`,
+			formatSQL: `SELECT multipoint FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (multipoint) VALUES (1)`,
+			formatSQL: `INSERT INTO t (multipoint) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET multipoint=1`,
+			formatSQL: `UPDATE t SET multipoint=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE multipoint=1`,
+			formatSQL: `DELETE FROM t WHERE multipoint=1`,
+			noError:   true,
+		},
+		// MULTILINESTRING
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,multilinestring INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,multilinestring INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT multilinestring FROM t`,
+			formatSQL: `SELECT multilinestring FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (multilinestring) VALUES (1)`,
+			formatSQL: `INSERT INTO t (multilinestring) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET multilinestring=1`,
+			formatSQL: `UPDATE t SET multilinestring=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE multilinestring=1`,
+			formatSQL: `DELETE FROM t WHERE multilinestring=1`,
+			noError:   true,
+		},
+		// MULTIPOLYGON
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,multipolygon INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,multipolygon INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT multipolygon FROM t`,
+			formatSQL: `SELECT multipolygon FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (multipolygon) VALUES (1)`,
+			formatSQL: `INSERT INTO t (multipolygon) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET multipolygon=1`,
+			formatSQL: `UPDATE t SET multipolygon=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE multipolygon=1`,
+			formatSQL: `DELETE FROM t WHERE multipolygon=1`,
+			noError:   true,
+		},
+		// GEOMETRYCOLLECTION
+		{
+			sql:       `CREATE TABLE t (id INT PRIMARY KEY,geometrycollection INT(8) NOT NULL)`,
+			formatSQL: `CREATE TABLE t (id INT PRIMARY KEY,geometrycollection INT(8) NOT NULL)`,
+			noError:   true,
+		},
+		{
+			sql:       `SELECT geometrycollection FROM t`,
+			formatSQL: `SELECT geometrycollection FROM t`,
+			noError:   true,
+		},
+		{
+			sql:       `INSERT INTO t (geometrycollection) VALUES (1)`,
+			formatSQL: `INSERT INTO t (geometrycollection) VALUES (1)`,
+			noError:   true,
+		},
+		{
+			sql:       `UPDATE t SET geometrycollection=1`,
+			formatSQL: `UPDATE t SET geometrycollection=1`,
+			noError:   true,
+		},
+		{
+			sql:       `DELETE FROM t WHERE geometrycollection=1`,
+			formatSQL: `DELETE FROM t WHERE geometrycollection=1`,
+			noError:   true,
+		},
+	}
+
+	for _, c := range tc {
+		stmt, err := parser.ParseOneStmt(c.sql, "", "")
+		if err != nil {
+			if c.noError {
+				t.Error(err)
+				continue
+			}
+			if err.Error() != c.errMsg {
+				t.Errorf("expect error message: %s; actual error message: %s", c.errMsg, err.Error())
+				continue
+			}
+			continue
+		} else {
+			if !c.noError {
+				t.Errorf("expect need error, but no error")
+				continue
+			}
+			buf := new(bytes.Buffer)
+			restoreCtx := format.NewRestoreCtx(format.RestoreKeyWordUppercase, buf)
+			err = stmt.Restore(restoreCtx)
+			if nil != err {
+				t.Error(err)
+				continue
+			}
+			if buf.String() != c.formatSQL {
+				t.Errorf("expect sql format: %s; actual sql format: %s", c.formatSQL, buf.String())
+			}
+		}
+	}
+}
