@@ -9,6 +9,97 @@ import (
 	"github.com/pingcap/parser/format"
 )
 
+func TestStartLine(t *testing.T) {
+	// 测试用例第2个到第5个sql是解析器不能解析的sql
+	p := parser.New()
+	stmts, _, err := p.PerfectParse(`grant all on point_trans_shard_00_part_202401 to kgoldpointapp;
+create table point_trans_shard_00_part_202401(like point_trans_shard_00 including all) inherits(point_trans_shard_00);
+Alter table point_trans_shard_00_part_202401 ADD CONSTRAINT chk_point_trans_shard_202401 CHECK (processedtime >= '1704038400000'::bigint AND processedtime < '1706716800000'::bigint );
+create table point_trans_source_shard_00_part_202401(like point_trans_source_shard_00 including all) inherits(point_trans_source_shard_00);
+Alter table point_trans_source_shard_00_part_202401 ADD CONSTRAINT chk_point_trans_source_shard_202401 CHECK (processedtime >= '1704038400000'::bigint AND processedtime < '1706716800000'::bigint );
+grant select on point_trans_shard_00_part_202401 to prd_fin, dbsec, sec_db_scan;
+grant all on point_trans_source_shard_00_part_202401 to kgoldpointapp;
+grant select on point_trans_source_shard_00_part_202401 to prd_fin, dbsec, sec_db_scan;
+`, "", "")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if len(stmts) != 8 {
+		t.Errorf("expect 2 stmts, actual is %d", len(stmts))
+		return
+	}
+	for i, stmt := range stmts {
+		if stmt.StartLine() != i+1 {
+			t.Errorf("expect start line is %d, actual is %d", i+1, stmt.StartLine())
+		}
+	}
+
+	// 所有测试用例都是可以解析的sql
+	p = parser.New()
+	nodes, _, err := p.PerfectParse(`grant select on point_trans_shard_00_part_202401 to prd_fin, dbsec, sec_db_scan;
+grant all on point_trans_source_shard_00_part_202401 to kgoldpointapp;
+grant select on point_trans_source_shard_00_part_202401 to prd_fin, dbsec, sec_db_scan;
+`, "", "")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if len(nodes) != 3 {
+		t.Errorf("expect 3 nodes, actual is %d", len(nodes))
+		return
+	}
+	for i, node := range nodes {
+		if node.StartLine() != i+1 {
+			t.Errorf("expect start line is %d, actual is %d", i+1, node.StartLine())
+		}
+	}
+
+	// 所有测试用例都是不可以解析的sql
+	p = parser.New()
+	stmtNodes, _, err := p.PerfectParse(`create table point_trans_shard_00_part_202401(like point_trans_shard_00 including all) inherits(point_trans_shard_00);
+Alter table point_trans_shard_00_part_202401 ADD CONSTRAINT chk_point_trans_shard_202401 CHECK (processedtime >= '1704038400000'::bigint AND processedtime < '1706716800000'::bigint );
+create table point_trans_source_shard_00_part_202401(like point_trans_source_shard_00 including all) inherits(point_trans_source_shard_00);`, "", "")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if len(stmtNodes) != 3 {
+		t.Errorf("expect 3 stmts, actual is %d", len(stmtNodes))
+		return
+	}
+	for i, stmt := range stmtNodes {
+		if stmt.StartLine() != i+1 {
+			t.Errorf("expect start line is %d, actual is %d", i+1, stmt.StartLine())
+		}
+	}
+
+	// 并排sql测试用例,备注:3个sql都不能被解析
+	p = parser.New()
+	stmts, _, err = p.PerfectParse(`create table point_trans_shard_00_part_202401(like point_trans_shard_00 including all) inherits(point_trans_shard_00);
+Alter table point_trans_shard_00_part_202401 ADD CONSTRAINT chk_point_trans_shard_202401 CHECK (processedtime >= '1704038400000'::bigint AND processedtime < '1706716800000'::bigint );create table point_trans_source_shard_00_part_202401(like point_trans_source_shard_00 including all) inherits(point_trans_source_shard_00);`, "", "")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if len(stmts) != 3 {
+		t.Errorf("expect 3 stmts, actual is %d", len(stmts))
+		return
+	}
+
+	for i, stmt := range stmts {
+		if i == 2 {
+			if stmt.StartLine() != 2 {
+				t.Errorf("expect start line is 2, actual is %d", stmt.StartLine())
+			}
+		} else {
+			if stmt.StartLine() != i+1 {
+				t.Errorf("expect start line is %d, actual is %d", i+1, stmt.StartLine())
+			}
+		}
+	}
+}
+
 func TestPerfectParse(t *testing.T) {
 	parser := parser.New()
 
