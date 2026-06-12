@@ -558,6 +558,7 @@ import (
 	tableChecksum         "TABLE_CHECKSUM"
 	tables                "TABLES"
 	tablespace            "TABLESPACE"
+	template              "TEMPLATE"
 	temporary             "TEMPORARY"
 	temptable             "TEMPTABLE"
 	textType              "TEXT"
@@ -1072,6 +1073,7 @@ import (
 	SubPartDefinitionList                  "SubPartition definition list"
 	SubPartDefinitionListOpt               "SubPartition definition list optional"
 	SubPartitionMethod                     "SubPartition method"
+	TdSubPartitionMethod                   "TDSQL SubPartition method (RANGE/LIST)"
 	SubPartitionOpt                        "SubPartition option"
 	SubPartitionNumOpt                     "SubPartition NUM option"
 	Symbol                                 "Constraint Symbol"
@@ -1280,6 +1282,8 @@ import (
 %precedence charsetKwd
 %precedence lowerThanKey
 %precedence key
+%precedence lowerThanSubpartitionKeyword
+%precedence subpartition
 %precedence lowerThanLocal
 %precedence local
 %precedence lowerThanRemove
@@ -1554,6 +1558,35 @@ AlterTableSpec:
 		}
 		yylex.AppendError(yylex.Errorf("TiDB does not support EXCHANGE PARTITION now, it would be parsed but ignored."))
 		parser.lastErrorAsWarn()
+	}
+|	"ADD" "SUBPARTITION" "TEMPLATE" '(' SubPartDefinitionList ')'
+	{
+		$$ = &ast.AlterTableSpec{
+			Tp:                       ast.AlterTableAddSubpartitionTemplate,
+			SubpartitionTemplateDefs: $5.([]*ast.SubPartitionDefinition),
+		}
+	}
+|	"DROP" "SUBPARTITION" "TEMPLATE" Identifier
+	{
+		$$ = &ast.AlterTableSpec{
+			Tp:                       ast.AlterTableDropSubpartitionTemplate,
+			SubpartitionTemplateName: model.NewCIStr($4),
+		}
+	}
+|	"TRUNCATE" "SUBPARTITION" "TEMPLATE" Identifier
+	{
+		$$ = &ast.AlterTableSpec{
+			Tp:                       ast.AlterTableTruncateSubpartitionTemplate,
+			SubpartitionTemplateName: model.NewCIStr($4),
+		}
+	}
+|	"MODIFY" "PARTITION" Identifier "TRUNCATE" "SUBPARTITION" "TEMPLATE" Identifier
+	{
+		$$ = &ast.AlterTableSpec{
+			Tp:                       ast.AlterTableModifyPartitionTruncateSubpartitionTemplate,
+			PartitionNames:           []model.CIStr{model.NewCIStr($3)},
+			SubpartitionTemplateName: model.NewCIStr($7),
+		}
 	}
 |	"TRUNCATE" "PARTITION" AllOrPartitionNameList
 	{
@@ -1988,6 +2021,7 @@ KeyOrIndexOpt:
 |	KeyOrIndex
 
 ColumnKeywordOpt:
+	/* empty */ %prec lowerThanSubpartitionKeyword
 	{}
 |	"COLUMN"
 
@@ -3379,6 +3413,24 @@ SubPartitionMethod:
 		}
 	}
 
+// TdSubPartitionMethod is the TDSQL/TXSQL secondary partition method, which
+// additionally allows RANGE(expr) and LIST(expr) used with SUBPARTITION TEMPLATE.
+TdSubPartitionMethod:
+	"RANGE" '(' Expression ')'
+	{
+		$$ = &ast.PartitionMethod{
+			Tp:   model.PartitionTypeRange,
+			Expr: $3.(ast.ExprNode),
+		}
+	}
+|	"LIST" '(' Expression ')'
+	{
+		$$ = &ast.PartitionMethod{
+			Tp:   model.PartitionTypeList,
+			Expr: $3.(ast.ExprNode),
+		}
+	}
+
 PartitionKeyAlgorithmOpt:
 	/* empty */
 	{}
@@ -3457,6 +3509,12 @@ SubPartitionOpt:
 	{
 		method := $3.(*ast.PartitionMethod)
 		method.Num = $4.(uint64)
+		$$ = method
+	}
+|	"SUBPARTITION" "BY" TdSubPartitionMethod "SUBPARTITION" "TEMPLATE" '(' SubPartDefinitionList ')'
+	{
+		method := $3.(*ast.PartitionMethod)
+		method.Template = $7.([]*ast.SubPartitionDefinition)
 		$$ = method
 	}
 
@@ -3582,12 +3640,20 @@ SubPartDefinitionList:
 	}
 
 SubPartDefinition:
-	"SUBPARTITION" Identifier PartDefOptionList
+	"SUBPARTITION" Identifier PartDefValuesOpt PartDefOptionList
 	{
-		$$ = &ast.SubPartitionDefinition{
+		def := &ast.SubPartitionDefinition{
 			Name:    model.NewCIStr($2),
-			Options: $3.([]*ast.TableOption),
+			Options: $4.([]*ast.TableOption),
 		}
+		// Keep Clause nil when no VALUES clause is given, so that the
+		// original `SUBPARTITION name [options]` syntax restores unchanged.
+		if clause, ok := $3.(ast.PartitionDefinitionClause); ok {
+			if _, isNone := clause.(*ast.PartitionDefinitionClauseNone); !isNone {
+				def.Clause = clause
+			}
+		}
+		$$ = def
 	}
 
 PartDefOptionList:
@@ -5151,6 +5217,7 @@ UnReservedKeyword:
 |	"SUBPARTITION"
 |	"TABLES"
 |	"TABLESPACE"
+|	"TEMPLATE"
 |	"TEXT"
 |	"THAN"
 |	"TIME" %prec lowerThanStringLitToken

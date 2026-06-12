@@ -642,6 +642,7 @@ var tokenMap = map[string]int{
 	"TABLESPACE":               tablespace,
 	"TELEMETRY":                telemetry,
 	"TELEMETRY_ID":             telemetryID,
+	"TEMPLATE":                 template,
 	"TEMPORARY":                temporary,
 	"TEMPTABLE":                temptable,
 	"TERMINATED":               terminated,

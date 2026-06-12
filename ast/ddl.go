@@ -2167,6 +2167,10 @@ const (
 	AlterTableWithoutValidation
 	AlterTableSecondaryLoad
 	AlterTableSecondaryUnload
+	AlterTableAddSubpartitionTemplate
+	AlterTableDropSubpartitionTemplate
+	AlterTableTruncateSubpartitionTemplate
+	AlterTableModifyPartitionTruncateSubpartitionTemplate
 	AlterTableRebuildPartition
 	AlterTableReorganizePartition
 	AlterTableCheckPartitions
@@ -2279,6 +2283,14 @@ type AlterTableSpec struct {
 	Num             uint64
 	Visibility      IndexVisibility
 	TiFlashReplica  *TiFlashReplicaSpec
+
+	// SubpartitionTemplateName is the template subpartition name used by TDSQL
+	// `{TRUNCATE | DROP} SUBPARTITION TEMPLATE name` and
+	// `MODIFY PARTITION p TRUNCATE SUBPARTITION TEMPLATE name`.
+	SubpartitionTemplateName model.CIStr
+	// SubpartitionTemplateDefs is the definition list used by TDSQL
+	// `ADD SUBPARTITION TEMPLATE (...)`.
+	SubpartitionTemplateDefs []*SubPartitionDefinition
 }
 
 type TiFlashReplicaSpec struct {
@@ -2560,6 +2572,34 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 			}
 			ctx.WriteName(name.O)
 		}
+	case AlterTableAddSubpartitionTemplate:
+		ctx.WriteKeyWord("ADD SUBPARTITION TEMPLATE ")
+		ctx.WritePlain("(")
+		for i, spd := range n.SubpartitionTemplateDefs {
+			if i != 0 {
+				ctx.WritePlain(",")
+			}
+			if err := spd.Restore(ctx); err != nil {
+				return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.SubpartitionTemplateDefs[%d]", i)
+			}
+		}
+		ctx.WritePlain(")")
+	case AlterTableDropSubpartitionTemplate:
+		ctx.WriteKeyWord("DROP SUBPARTITION TEMPLATE ")
+		ctx.WriteName(n.SubpartitionTemplateName.O)
+	case AlterTableTruncateSubpartitionTemplate:
+		ctx.WriteKeyWord("TRUNCATE SUBPARTITION TEMPLATE ")
+		ctx.WriteName(n.SubpartitionTemplateName.O)
+	case AlterTableModifyPartitionTruncateSubpartitionTemplate:
+		ctx.WriteKeyWord("MODIFY PARTITION ")
+		for i, name := range n.PartitionNames {
+			if i != 0 {
+				ctx.WritePlain(",")
+			}
+			ctx.WriteName(name.O)
+		}
+		ctx.WriteKeyWord(" TRUNCATE SUBPARTITION TEMPLATE ")
+		ctx.WriteName(n.SubpartitionTemplateName.O)
 	case AlterTableCheckPartitions:
 		ctx.WriteKeyWord("CHECK PARTITION ")
 		if n.OnAllPartitions {
@@ -2878,13 +2918,21 @@ var (
 )
 
 type SubPartitionDefinition struct {
-	Name    model.CIStr
+	Name model.CIStr
+	// Clause is the TDSQL subpartition template values clause,
+	// e.g. `VALUES LESS THAN (...)` / `VALUES IN (...)`. May be nil.
+	Clause  PartitionDefinitionClause
 	Options []*TableOption
 }
 
 func (spd *SubPartitionDefinition) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("SUBPARTITION ")
 	ctx.WriteName(spd.Name.O)
+	if spd.Clause != nil {
+		if err := spd.Clause.restore(ctx); err != nil {
+			return errors.Annotate(err, "An error occurred while restore SubPartitionDefinition.Clause")
+		}
+	}
 	for i, opt := range spd.Options {
 		ctx.WritePlain(" ")
 		if err := opt.Restore(ctx); err != nil {
@@ -3152,6 +3200,10 @@ type PartitionMethod struct {
 
 	// Num is the number of (sub)partitions required by the method.
 	Num uint64
+
+	// Template is the TDSQL `SUBPARTITION TEMPLATE (...)` definition list,
+	// only used when this method describes a subpartition.
+	Template []*SubPartitionDefinition
 }
 
 // Restore implements the Node interface
@@ -3328,6 +3380,19 @@ func (n *PartitionOptions) Restore(ctx *format.RestoreCtx) error {
 		if n.Sub.Num > 0 {
 			ctx.WriteKeyWord(" SUBPARTITIONS ")
 			ctx.WritePlainf("%d", n.Sub.Num)
+		}
+		if len(n.Sub.Template) > 0 {
+			ctx.WriteKeyWord(" SUBPARTITION TEMPLATE ")
+			ctx.WritePlain("(")
+			for i, spd := range n.Sub.Template {
+				if i != 0 {
+					ctx.WritePlain(",")
+				}
+				if err := spd.Restore(ctx); err != nil {
+					return errors.Annotatef(err, "An error occurred while restore PartitionOptions.Sub.Template[%d]", i)
+				}
+			}
+			ctx.WritePlain(")")
 		}
 	}
 
