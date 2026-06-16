@@ -14,10 +14,13 @@
 package parser_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pingcap/parser"
 	"github.com/pingcap/parser/ast"
+	"github.com/pingcap/parser/format"
+	"github.com/pingcap/parser/model"
 	_ "github.com/pingcap/parser/test_driver"
 )
 
@@ -217,4 +220,299 @@ func TestTemplateAsIdentifierRegression(t *testing.T) {
 		mustParseOneStmt(t, sql)
 		_ = i
 	}
+}
+
+func restoreSQL(t *testing.T, stmt ast.StmtNode) string {
+	t.Helper()
+	var b strings.Builder
+	if err := stmt.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &b)); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+	return b.String()
+}
+
+// 文档3 标准例子的 round-trip：parse -> restore -> parse 必须等价。
+// 当前期望失败的根因：CreateTableStmt.Restore 未输出 TDSQL_DISTRIBUTED 子句，
+// 导致 restore 后再 parse 时遇到 TDSQL_PARTITION 没有 TDSQL_DISTRIBUTED 而报错。
+func TestTDSQLDoc3RestoreRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "doc3-employees: HASH dist + TDSQL_PARTITION BY RANGE",
+			sql: "CREATE TABLE `employees` (`id` INT NOT NULL,`hired` DATE NOT NULL,`store_id` INT,PRIMARY KEY(`id`, `hired`)) " +
+				"ENGINE = InnoDB " +
+				"TDSQL_DISTRIBUTED BY HASH(`id`) " +
+				"TDSQL_PARTITION BY RANGE (TDSQL_MONTH(`hired`)) " +
+				"(PARTITION `s0` VALUES LESS THAN (199001), PARTITION `s1` VALUES LESS THAN (200001))",
+		},
+		{
+			name: "doc3-customers_2: HASH dist + TDSQL_PARTITION BY LIST",
+			sql: "CREATE TABLE `customers_2` (`id` INT,`city_id` INT,PRIMARY KEY(`id`, `city_id`)) " +
+				"TDSQL_DISTRIBUTED BY HASH(`id`) " +
+				"TDSQL_PARTITION BY LIST (`city_id`) " +
+				"(PARTITION `sp1` VALUES IN (1, 2, 3), PARTITION `sp2` VALUES IN (4, 5, 6))",
+		},
+		{
+			name: "legacy: TDSQL_DISTRIBUTED BY RANGE without TDSQL_PARTITION (回归)",
+			sql: "CREATE TABLE `tb_sub_r_l` (`id` INT NOT NULL,`order_id` BIGINT NOT NULL,PRIMARY KEY(`id`, `order_id`)) " +
+				"PARTITION BY LIST (`order_id`) (PARTITION `p0` VALUES IN (2121122),PARTITION `p1` VALUES IN (38937383)) " +
+				"TDSQL_DISTRIBUTED BY RANGE(`id`) (`s1` VALUES LESS THAN (100),`s2` VALUES LESS THAN (1000))",
+		},
+	}
+
+	for _, ca := range cases {
+		t.Run(ca.name, func(t *testing.T) {
+			st1 := mustParseOneStmt(t, ca.sql)
+			ct1, ok := st1.(*ast.CreateTableStmt)
+			if !ok {
+				t.Fatalf("not CreateTableStmt")
+			}
+			if ct1.TdSqlDistributed == nil {
+				t.Fatalf("expected TdSqlDistributed != nil after first parse")
+			}
+
+			restored := restoreSQL(t, st1)
+			if !strings.Contains(strings.ToUpper(restored), "TDSQL_DISTRIBUTED") {
+				t.Fatalf("restored SQL missing TDSQL_DISTRIBUTED clause:\n%s", restored)
+			}
+
+			st2, err := parser.New().ParseOneStmt(restored, "", "")
+			if err != nil {
+				t.Fatalf("re-parse restored SQL failed: %v\nrestored: %s", err, restored)
+			}
+			ct2, ok := st2.(*ast.CreateTableStmt)
+			if !ok {
+				t.Fatalf("re-parsed stmt is not CreateTableStmt")
+			}
+			if ct2.TdSqlDistributed == nil {
+				t.Fatalf("re-parsed AST lost TdSqlDistributed")
+			}
+			if ct1.TdSqlDistributed.Tp != ct2.TdSqlDistributed.Tp {
+				t.Fatalf("dist Tp mismatch: %v vs %v", ct1.TdSqlDistributed.Tp, ct2.TdSqlDistributed.Tp)
+			}
+
+			if ct1.Partition != nil && ct1.Partition.Sub != nil {
+				if ct2.Partition == nil || ct2.Partition.Sub == nil {
+					t.Fatalf("re-parsed AST lost TDSQL_PARTITION sub clause")
+				}
+				if ct1.Partition.Sub.Tp != ct2.Partition.Sub.Tp {
+					t.Fatalf("sub Tp mismatch: %v vs %v", ct1.Partition.Sub.Tp, ct2.Partition.Sub.Tp)
+				}
+				if len(ct1.Partition.Sub.Template) != len(ct2.Partition.Sub.Template) {
+					t.Fatalf("sub template length mismatch: %d vs %d",
+						len(ct1.Partition.Sub.Template), len(ct2.Partition.Sub.Template))
+				}
+			}
+		})
+	}
+}
+
+// 仅 TdSqlDistributed.Restore 单元行为（HASH 分支必须输出 HASH(expr)）。
+func TestTdSqlDistributedRestoreHash(t *testing.T) {
+	sql := "CREATE TABLE t (id int) TDSQL_DISTRIBUTED BY HASH(id)"
+	st := mustParseOneStmt(t, sql)
+	ct := st.(*ast.CreateTableStmt)
+	if ct.TdSqlDistributed == nil || ct.TdSqlDistributed.Tp != model.PartitionTypeHash {
+		t.Fatalf("unexpected dist: %+v", ct.TdSqlDistributed)
+	}
+	out := restoreSQL(t, st)
+	upper := strings.ToUpper(out)
+	if !strings.Contains(upper, "TDSQL_DISTRIBUTED BY HASH") {
+		t.Fatalf("restored SQL missing 'TDSQL_DISTRIBUTED BY HASH':\n%s", out)
+	}
+	if _, err := parser.New().ParseOneStmt(out, "", ""); err != nil {
+		t.Fatalf("re-parse failed: %v\n%s", err, out)
+	}
+}
+
+func findIndexConstraint(t *testing.T, stmt *ast.CreateTableStmt, name string) *ast.Constraint {
+	t.Helper()
+	for _, c := range stmt.Constraints {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("index constraint %q not found", name)
+	return nil
+}
+
+func TestTDSQLDoc3SetGlobalIndex(t *testing.T) {
+	cases := []struct {
+		sql       string
+		setGlobal map[string]bool
+	}{
+		{
+			sql: "CREATE TABLE customers_1 (" +
+				"id int, store_id int, " +
+				"primary key(id), " +
+				"index idx1(store_id) SET_GLOBAL" +
+				") ENGINE=InnoDB tdsql_distributed by hash(id)",
+			setGlobal: map[string]bool{"idx1": true},
+		},
+		{
+			sql: "CREATE TABLE employees (" +
+				"id INT NOT NULL, fname VARCHAR(30), hired DATE NOT NULL DEFAULT '9999-12-31', " +
+				"separated DATE NOT NULL DEFAULT '9999-12-31', store_id INT, " +
+				"Primary key(id, hired), INDEX idx(store_id) SET_GLOBAL" +
+				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 " +
+				"TDSQL_DISTRIBUTED BY HASH (id) " +
+				"TDSQL_PARTITION BY RANGE ( tdsql_month(hired) ) (" +
+				"PARTITION s0 VALUES LESS THAN (199001), " +
+				"PARTITION s1 VALUES LESS THAN (200001), " +
+				"PARTITION s2 VALUES LESS THAN (201001))",
+			setGlobal: map[string]bool{"idx": true},
+		},
+		{
+			sql: "CREATE TABLE customers_2 (" +
+				"id int, city_id int, store_id int, bag_id int, birthday DATE, " +
+				"primary key(id, city_id), " +
+				"index idx1(store_id) SET_GLOBAL, " +
+				"index bag_idx2(bag_id) SET_GLOBAL, " +
+				"index bri_idx(birthday, id, city_id)" +
+				") tdsql_distributed by hash(id) " +
+				"TDSQL_PARTITION BY LIST (city_id) (" +
+				"PARTITION spRegion_1 VALUES IN(1, 2, 3), " +
+				"PARTITION spRegion_2 VALUES IN(4, 5, 6), " +
+				"PARTITION spRegion_3 VALUES IN(7, 8, 9), " +
+				"PARTITION spRegion_4 VALUES IN(10, 11, 12))",
+			setGlobal: map[string]bool{
+				"idx1":     true,
+				"bag_idx2": true,
+				"bri_idx":  false,
+			},
+		},
+	}
+	for i, ca := range cases {
+		stmt := mustParseOneStmt(t, ca.sql).(*ast.CreateTableStmt)
+		for name, want := range ca.setGlobal {
+			c := findIndexConstraint(t, stmt, name)
+			if c.Option == nil {
+				if want {
+					t.Fatalf("case %d: index %q: Option is nil, want SetGlobal=%v", i, name, want)
+				}
+				continue
+			}
+			if c.Option.SetGlobal != want {
+				t.Fatalf("case %d: index %q: SetGlobal=%v, want %v", i, name, c.Option.SetGlobal, want)
+			}
+		}
+	}
+}
+
+func TestTDSQLDoc3SetGlobalIdentifierRegression(t *testing.T) {
+	cases := []string{
+		"CREATE TABLE set_global (id int)",
+		"CREATE TABLE tdsql_partition (id int)",
+		"CREATE TABLE customers_1 (" +
+			"id int, store_id int, " +
+			"primary key(id), " +
+			"index idx1(store_id)" +
+			") ENGINE=InnoDB tdsql_distributed by hash(id)",
+	}
+	for i, sql := range cases {
+		mustParseOneStmt(t, sql)
+		_ = i
+	}
+}
+
+func TestTDSQLDoc3DistributedByHash(t *testing.T) {
+	cases := []string{
+		"CREATE TABLE customers_1 (" +
+			"id int, store_id int, primary key(id), index idx1(store_id) SET_GLOBAL" +
+			") ENGINE=InnoDB tdsql_distributed by hash(id)",
+		"CREATE TABLE employees (" +
+			"id INT NOT NULL, hired DATE NOT NULL DEFAULT '9999-12-31', store_id INT, " +
+			"Primary key(id, hired), INDEX idx(store_id) SET_GLOBAL" +
+			") ENGINE=InnoDB TDSQL_DISTRIBUTED BY HASH (id) " +
+			"TDSQL_PARTITION BY RANGE ( tdsql_month(hired) ) (" +
+			"PARTITION s0 VALUES LESS THAN (199001))",
+		"CREATE TABLE customers_2 (" +
+			"id int, city_id int, store_id int, " +
+			"primary key(id, city_id), index idx1(store_id) SET_GLOBAL" +
+			") tdsql_distributed by hash(id) " +
+			"TDSQL_PARTITION BY LIST (city_id) (" +
+			"PARTITION spRegion_1 VALUES IN(1, 2, 3))",
+	}
+	for i, sql := range cases {
+		stmt := mustParseOneStmt(t, sql).(*ast.CreateTableStmt)
+		if stmt.TdSqlDistributed == nil {
+			t.Fatalf("case %d: TdSqlDistributed is nil", i)
+		}
+		method := stmt.TdSqlDistributed.PartitionMethod
+		if method.Tp != model.PartitionTypeHash {
+			t.Fatalf("case %d: partition type=%v, want HASH", i, method.Tp)
+		}
+		if method.Expr == nil {
+			t.Fatalf("case %d: HASH expr is nil", i)
+		}
+	}
+}
+
+func TestTDSQLDoc3PartitionBySubpartition(t *testing.T) {
+	t.Run("RANGE", func(t *testing.T) {
+		sql := "CREATE TABLE employees (" +
+			"id INT NOT NULL, fname VARCHAR(30), hired DATE NOT NULL DEFAULT '9999-12-31', " +
+			"separated DATE NOT NULL DEFAULT '9999-12-31', store_id INT, " +
+			"Primary key(id, hired), INDEX idx(store_id) SET_GLOBAL" +
+			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 " +
+			"TDSQL_DISTRIBUTED BY HASH (id) " +
+			"TDSQL_PARTITION BY RANGE ( tdsql_month(hired) ) (" +
+			"PARTITION s0 VALUES LESS THAN (199001), " +
+			"PARTITION s1 VALUES LESS THAN (200001), " +
+			"PARTITION s2 VALUES LESS THAN (201001))"
+		stmt := mustParseOneStmt(t, sql).(*ast.CreateTableStmt)
+		if stmt.Partition == nil || stmt.Partition.Sub == nil {
+			t.Fatal("missing Partition.Sub")
+		}
+		sub := stmt.Partition.Sub
+		if sub.Tp != model.PartitionTypeRange {
+			t.Fatalf("sub partition type=%v, want RANGE", sub.Tp)
+		}
+		if sub.Expr == nil {
+			t.Fatal("sub partition expr is nil")
+		}
+		if len(sub.Template) != 3 {
+			t.Fatalf("template count=%d, want 3", len(sub.Template))
+		}
+		if sub.Template[0].Name.O != "s0" {
+			t.Fatalf("first template name=%q, want s0", sub.Template[0].Name.O)
+		}
+		if _, ok := sub.Template[0].Clause.(*ast.PartitionDefinitionClauseLessThan); !ok {
+			t.Fatalf("first template clause type=%T, want *PartitionDefinitionClauseLessThan", sub.Template[0].Clause)
+		}
+	})
+
+	t.Run("LIST", func(t *testing.T) {
+		sql := "CREATE TABLE customers_2 (" +
+			"id int, city_id int, store_id int, bag_id int, birthday DATE, " +
+			"primary key(id, city_id), " +
+			"index idx1(store_id) SET_GLOBAL, " +
+			"index bag_idx2(bag_id) SET_GLOBAL, " +
+			"index bri_idx(birthday, id, city_id)" +
+			") tdsql_distributed by hash(id) " +
+			"TDSQL_PARTITION BY LIST (city_id) (" +
+			"PARTITION spRegion_1 VALUES IN(1, 2, 3), " +
+			"PARTITION spRegion_2 VALUES IN(4, 5, 6), " +
+			"PARTITION spRegion_3 VALUES IN(7, 8, 9), " +
+			"PARTITION spRegion_4 VALUES IN(10, 11, 12))"
+		stmt := mustParseOneStmt(t, sql).(*ast.CreateTableStmt)
+		if stmt.Partition == nil || stmt.Partition.Sub == nil {
+			t.Fatal("missing Partition.Sub")
+		}
+		sub := stmt.Partition.Sub
+		if sub.Tp != model.PartitionTypeList {
+			t.Fatalf("sub partition type=%v, want LIST", sub.Tp)
+		}
+		if len(sub.Template) != 4 {
+			t.Fatalf("template count=%d, want 4", len(sub.Template))
+		}
+		if sub.Template[0].Name.O != "spRegion_1" {
+			t.Fatalf("first template name=%q, want spRegion_1", sub.Template[0].Name.O)
+		}
+		if _, ok := sub.Template[0].Clause.(*ast.PartitionDefinitionClauseIn); !ok {
+			t.Fatalf("first template clause type=%T, want *PartitionDefinitionClauseIn", sub.Template[0].Clause)
+		}
+	})
 }

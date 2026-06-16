@@ -388,6 +388,8 @@ import (
 	full                  "FULL"
 	function              "FUNCTION"
 	general               "GENERAL"
+	geometry              "GEOMETRY"
+	geometrycollection    "GEOMETRYCOLLECTION"
 	global                "GLOBAL"
 	grants                "GRANTS"
 	hash                  "HASH"
@@ -418,6 +420,7 @@ import (
 	lastval               "LASTVAL"
 	less                  "LESS"
 	level                 "LEVEL"
+	linestring            "LINESTRING"
 	list                  "LIST"
 	local                 "LOCAL"
 	location              "LOCATION"
@@ -440,6 +443,9 @@ import (
 	mode                  "MODE"
 	modify                "MODIFY"
 	month                 "MONTH"
+	multilinestring       "MULTILINESTRING"
+	multipoint            "MULTIPOINT"
+	multipolygon          "MULTIPOLYGON"
 	names                 "NAMES"
 	national              "NATIONAL"
 	ncharType             "NCHAR"
@@ -472,6 +478,8 @@ import (
 	per_table             "PER_TABLE"
 	pipesAsOr
 	plugins               "PLUGINS"
+	point                 "POINT"
+	polygon               "POLYGON"
 	preSplitRegions       "PRE_SPLIT_REGIONS"
 	preceding             "PRECEDING"
 	prepare               "PREPARE"
@@ -518,6 +526,7 @@ import (
 	serializable          "SERIALIZABLE"
 	session               "SESSION"
 	setval                "SETVAL"
+	set_global            "SET_GLOBAL"
 	shardRowIDBits        "SHARD_ROW_ID_BITS"
 	share                 "SHARE"
 	shared                "SHARED"
@@ -558,6 +567,7 @@ import (
 	tableChecksum         "TABLE_CHECKSUM"
 	tables                "TABLES"
 	tablespace            "TABLESPACE"
+	tdsql_partition       "TDSQL_PARTITION"
 	template              "TEMPLATE"
 	temporary             "TEMPORARY"
 	temptable             "TEMPTABLE"
@@ -705,16 +715,6 @@ import (
 	builtinUser
 	builtinVarPop
 	builtinVarSamp
-
-	/* The following tokens belong to GEOMETRY column. */
-	geometry           "GEOMETRY"
-	point              "POINT"
-	linestring         "LINESTRING"
-	polygon            "POLYGON"
-	multipoint         "MULTIPOINT"
-	multilinestring    "MULTILINESTRING"
-	multipolygon       "MULTIPOLYGON"
-	geometrycollection "GEOMETRYCOLLECTION"
 
 %token	<item>
 
@@ -999,6 +999,7 @@ import (
 	PartitionKeyAlgorithmOpt               "ALGORITHM = n option for KEY partition"
 	PartitionMethod                        "Partition method"
 	TdSqlDistributed 					   "TD SQL Distributed"
+	TdSqlSubPartitionOpt                   "TD SQL SubPartition option"
 	TdSqlDistrubutedMethod 				   "TD SQL Distributed method"
 	PartitionOpt                           "Partition option"
 	PartitionNameList                      "Partition name list"
@@ -1132,6 +1133,7 @@ import (
 	WithGrantOptionOpt                     "With Grant Option opt"
 	WithValidation                         "with validation"
 	WithValidationOpt                      "optional with validation"
+	WithGlobalIndexOpt                     "optional with global index"
 	ElseOpt                                "Optional else clause"
 	Type                                   "Types"
 	OptExistingWindowName                  "Optional existing WINDOW name"
@@ -1588,10 +1590,11 @@ AlterTableSpec:
 			SubpartitionTemplateName: model.NewCIStr($7),
 		}
 	}
-|	"TRUNCATE" "PARTITION" AllOrPartitionNameList
+|	"TRUNCATE" "PARTITION" AllOrPartitionNameList WithGlobalIndexOpt
 	{
 		ret := &ast.AlterTableSpec{
-			Tp: ast.AlterTableTruncatePartition,
+			Tp:              ast.AlterTableTruncatePartition,
+			WithGlobalIndex: $4.(bool),
 		}
 		if $3 == nil {
 			ret.OnAllPartitions = true
@@ -1966,6 +1969,15 @@ WithValidation:
 |	"WITHOUT" "VALIDATION"
 	{
 		$$ = false
+	}
+
+WithGlobalIndexOpt:
+	{
+		$$ = false
+	}
+|	"WITH" "GLOBAL" "INDEX"
+	{
+		$$ = true
 	}
 
 AlgorithmClause:
@@ -3300,7 +3312,7 @@ DatabaseOptionList:
  *      )
  *******************************************************************/
 CreateTableStmt:
-	"CREATE" OptTemporary "TABLE" IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt TdSqlDistributed DuplicateOpt AsOpt CreateTableSelectOpt
+	"CREATE" OptTemporary "TABLE" IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt TdSqlDistributed TdSqlSubPartitionOpt DuplicateOpt AsOpt CreateTableSelectOpt
 	{
 		stmt := $6.(*ast.CreateTableStmt)
 		stmt.Table = $5.(*ast.TableName)
@@ -3313,8 +3325,19 @@ CreateTableStmt:
 		if $9 != nil {
 			stmt.TdSqlDistributed = $9.(*ast.TdSqlDistributed)
 		}
-		stmt.OnDuplicate = $10.(ast.OnDuplicateKeyHandlingType)
-		stmt.Select = $12.(*ast.CreateTableStmt).Select
+		if $10 != nil {
+			if stmt.TdSqlDistributed == nil {
+				yylex.AppendError(yylex.Errorf("TDSQL_PARTITION requires TDSQL_DISTRIBUTED"))
+				return 1
+			}
+			sub := $10.(*ast.PartitionMethod)
+			if stmt.Partition == nil {
+				stmt.Partition = &ast.PartitionOptions{}
+			}
+			stmt.Partition.Sub = sub
+		}
+		stmt.OnDuplicate = $11.(ast.OnDuplicateKeyHandlingType)
+		stmt.Select = $13.(*ast.CreateTableStmt).Select
 		$$ = stmt
 	}
 |	"CREATE" OptTemporary "TABLE" IfNotExists TableName LikeTableWithOrWithoutParen
@@ -3354,6 +3377,27 @@ TdSqlDistributed:
    		$$ = tdSqlDistributed
    }
 
+TdSqlSubPartitionOpt:
+	{
+		$$ = nil
+	}
+|	"TDSQL_PARTITION" "BY" TdSubPartitionMethod PartitionDefinitionListOpt
+	{
+		method := $3.(*ast.PartitionMethod)
+		if defs, ok := $4.([]*ast.PartitionDefinition); ok && len(defs) > 0 {
+			template := make([]*ast.SubPartitionDefinition, 0, len(defs))
+			for _, pd := range defs {
+				template = append(template, &ast.SubPartitionDefinition{
+					Name:    pd.Name,
+					Clause:  pd.Clause,
+					Options: pd.Options,
+				})
+			}
+			method.Template = template
+		}
+		$$ = method
+	}
+
 TdSqlDistrubutedMethod:
    {
    	   $$ = nil
@@ -3370,6 +3414,13 @@ TdSqlDistrubutedMethod:
 		$$ = &ast.PartitionMethod{
 			Tp:          model.PartitionTypeList,
 			ColumnNames: $3.([]*ast.ColumnName),
+		}
+	}
+|	"HASH" '(' Expression ')'
+	{
+		$$ = &ast.PartitionMethod{
+			Tp:   model.PartitionTypeHash,
+			Expr: $3.(ast.ExprNode),
 		}
 	}
 
@@ -5005,6 +5056,8 @@ IndexOptionList:
 				opt1.ParserName = opt2.ParserName
 			} else if opt2.Visibility != ast.IndexVisibilityDefault {
 				opt1.Visibility = opt2.Visibility
+			} else if opt2.SetGlobal {
+				opt1.SetGlobal = opt2.SetGlobal
 			}
 			$$ = opt1
 		}
@@ -5041,6 +5094,12 @@ IndexOption:
 	{
 		$$ = &ast.IndexOption{
 			Visibility: $1.(ast.IndexVisibility),
+		}
+	}
+|	"SET_GLOBAL"
+	{
+		$$ = &ast.IndexOption{
+			SetGlobal: true,
 		}
 	}
 
@@ -5206,6 +5265,7 @@ UnReservedKeyword:
 |	"ROLE"
 |	"ROLLBACK"
 |	"SESSION"
+|	"SET_GLOBAL"
 |	"SIGNED"
 |	"SHARD_ROW_ID_BITS"
 |	"SHUTDOWN"
@@ -5218,6 +5278,7 @@ UnReservedKeyword:
 |	"TABLES"
 |	"TABLESPACE"
 |	"TEMPLATE"
+|	"TDSQL_PARTITION"
 |	"TEXT"
 |	"THAN"
 |	"TIME" %prec lowerThanStringLitToken

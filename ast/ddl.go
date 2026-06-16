@@ -605,6 +605,7 @@ type IndexOption struct {
 	Comment      string
 	ParserName   model.CIStr
 	Visibility   IndexVisibility
+	SetGlobal    bool
 }
 
 // Restore implements Node interface.
@@ -653,6 +654,14 @@ func (n *IndexOption) Restore(ctx *format.RestoreCtx) error {
 		case IndexVisibilityInvisible:
 			ctx.WriteKeyWord("INVISIBLE")
 		}
+		hasPrevOption = true
+	}
+
+	if n.SetGlobal {
+		if hasPrevOption {
+			ctx.WritePlain(" ")
+		}
+		ctx.WriteKeyWord("SET_GLOBAL")
 	}
 	return nil
 }
@@ -963,10 +972,31 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 	}
 
+	// Grammar order is: PartitionOpt -> TdSqlDistributed -> TdSqlSubPartitionOpt.
+	// The TDSQL_PARTITION (subpartition) clause is restored as part of
+	// Partition.Restore when Partition.Tp == 0; in that case TdSqlDistributed
+	// must come BEFORE Partition. Otherwise Partition (standard PARTITION BY)
+	// comes first and TdSqlDistributed follows.
+	tdsqlPartitionOnly := n.Partition != nil && n.Partition.Tp == 0 && n.Partition.Sub != nil
+
+	if tdsqlPartitionOnly && n.TdSqlDistributed != nil {
+		ctx.WritePlain(" ")
+		if err := n.TdSqlDistributed.Restore(ctx); err != nil {
+			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt TdSqlDistributed")
+		}
+	}
+
 	if n.Partition != nil {
 		ctx.WritePlain(" ")
 		if err := n.Partition.Restore(ctx); err != nil {
 			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt Partition")
+		}
+	}
+
+	if !tdsqlPartitionOnly && n.TdSqlDistributed != nil {
+		ctx.WritePlain(" ")
+		if err := n.TdSqlDistributed.Restore(ctx); err != nil {
+			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt TdSqlDistributed")
 		}
 	}
 
@@ -1070,7 +1100,7 @@ func (n *DropTableStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore DropTableStmt.Tables "+string(index))
+			return errors.Annotate(err, "An error occurred while restore DropTableStmt.Tables")
 		}
 	}
 
@@ -2291,6 +2321,9 @@ type AlterTableSpec struct {
 	// SubpartitionTemplateDefs is the definition list used by TDSQL
 	// `ADD SUBPARTITION TEMPLATE (...)`.
 	SubpartitionTemplateDefs []*SubPartitionDefinition
+
+	// WithGlobalIndex is true for TDSQL `TRUNCATE PARTITION ... WITH GLOBAL INDEX`.
+	WithGlobalIndex bool
 }
 
 type TiFlashReplicaSpec struct {
@@ -2564,13 +2597,16 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("TRUNCATE PARTITION ")
 		if n.OnAllPartitions {
 			ctx.WriteKeyWord("ALL")
-			return nil
-		}
-		for i, name := range n.PartitionNames {
-			if i != 0 {
-				ctx.WritePlain(",")
+		} else {
+			for i, name := range n.PartitionNames {
+				if i != 0 {
+					ctx.WritePlain(",")
+				}
+				ctx.WriteName(name.O)
 			}
-			ctx.WriteName(name.O)
+		}
+		if n.WithGlobalIndex {
+			ctx.WriteKeyWord(" WITH GLOBAL INDEX")
 		}
 	case AlterTableAddSubpartitionTemplate:
 		ctx.WriteKeyWord("ADD SUBPARTITION TEMPLATE ")
@@ -3280,6 +3316,75 @@ type TdSqlDistributed struct {
 	*PartitionOptions
 }
 
+// Restore implements Node interface.
+// The TDSQL_DISTRIBUTED grammar differs from the standard PARTITION BY grammar
+// in two ways and therefore cannot delegate to PartitionMethod.Restore /
+// PartitionDefinition.Restore:
+//   1. RANGE/LIST take a column list directly (`RANGE(col, ...)`) instead of
+//      `RANGE COLUMNS (col, ...)`.
+//   2. The optional definition list uses identifiers (`s1 VALUES LESS THAN ...`)
+//      WITHOUT the `PARTITION` keyword (see TdPartitionDefinition in parser.y).
+func (t *TdSqlDistributed) Restore(ctx *format.RestoreCtx) error {
+	if t == nil || t.PartitionOptions == nil {
+		return nil
+	}
+	ctx.WriteKeyWord("TDSQL_DISTRIBUTED BY ")
+	switch t.Tp {
+	case model.PartitionTypeHash:
+		ctx.WriteKeyWord("HASH")
+		ctx.WritePlain(" (")
+		if t.Expr != nil {
+			if err := t.Expr.Restore(ctx); err != nil {
+				return errors.Annotate(err, "An error occurred while restore TdSqlDistributed.Expr")
+			}
+		}
+		ctx.WritePlain(")")
+	case model.PartitionTypeRange, model.PartitionTypeList:
+		ctx.WriteKeyWord(t.Tp.String())
+		ctx.WritePlain(" (")
+		for i, col := range t.ColumnNames {
+			if i > 0 {
+				ctx.WritePlain(",")
+			}
+			if err := col.Restore(ctx); err != nil {
+				return errors.Annotatef(err, "An error occurred while restore TdSqlDistributed.ColumnNames[%d]", i)
+			}
+		}
+		ctx.WritePlain(")")
+	default:
+		return errors.Errorf("unsupported TdSqlDistributed type: %v", t.Tp)
+	}
+	if t.Num > 0 && len(t.Definitions) == 0 {
+		ctx.WriteKeyWord(" PARTITIONS ")
+		ctx.WritePlainf("%d", t.Num)
+	}
+	if len(t.Definitions) > 0 {
+		ctx.WritePlain(" (")
+		for i, def := range t.Definitions {
+			if i > 0 {
+				ctx.WritePlain(",")
+			}
+			ctx.WriteName(def.Name.O)
+			if def.Clause != nil {
+				if _, isNone := def.Clause.(*PartitionDefinitionClauseNone); !isNone {
+					ctx.WritePlain(" ")
+					if err := def.Clause.restore(ctx); err != nil {
+						return errors.Annotatef(err, "An error occurred while restore TdSqlDistributed.Definitions[%d].Clause", i)
+					}
+				}
+			}
+			for _, opt := range def.Options {
+				ctx.WritePlain(" ")
+				if err := opt.Restore(ctx); err != nil {
+					return errors.Annotatef(err, "An error occurred while restore TdSqlDistributed.Definitions[%d].Options", i)
+				}
+			}
+		}
+		ctx.WritePlain(")")
+	}
+	return nil
+}
+
 func (t *TdSqlDistributed) Validate() error {
 	// if both a partition list and the partition numbers are specified, their values must match
 	if t.Num != 0 && len(t.Definitions) != 0 && t.Num != uint64(len(t.Definitions)) {
@@ -3362,6 +3467,31 @@ func (n *PartitionOptions) Validate() error {
 }
 
 func (n *PartitionOptions) Restore(ctx *format.RestoreCtx) error {
+	if n.Tp == 0 && n.Sub != nil {
+		ctx.WriteKeyWord("TDSQL_PARTITION BY ")
+		if err := n.Sub.Restore(ctx); err != nil {
+			return errors.Annotate(err, "An error occurred while restore PartitionOptions.Sub")
+		}
+		if len(n.Sub.Template) > 0 {
+			ctx.WritePlain(" (")
+			for i, spd := range n.Sub.Template {
+				if i > 0 {
+					ctx.WritePlain(", ")
+				}
+				pd := &PartitionDefinition{
+					Name:    spd.Name,
+					Clause:  spd.Clause,
+					Options: spd.Options,
+				}
+				if err := pd.Restore(ctx); err != nil {
+					return errors.Annotatef(err, "An error occurred while restore PartitionOptions.Sub.Template[%d]", i)
+				}
+			}
+			ctx.WritePlain(")")
+		}
+		return nil
+	}
+
 	ctx.WriteKeyWord("PARTITION BY ")
 	if err := n.PartitionMethod.Restore(ctx); err != nil {
 		return errors.Annotate(err, "An error occurred while restore PartitionOptions.PartitionMethod")
