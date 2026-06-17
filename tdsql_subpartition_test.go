@@ -516,3 +516,155 @@ func TestTDSQLDoc3PartitionBySubpartition(t *testing.T) {
 		}
 	})
 }
+
+// "正确语法"语料按 4 种 shape 归纳，下列样例均为脱敏后的等价 DDL：
+//  1. 仅 TDSQL_DISTRIBUTED BY HASH(col)
+//  2. TDSQL_DISTRIBUTED BY HASH(col) + TDSQL_PARTITION BY RANGE(tdsql_day(col))
+//  3. TDSQL_DISTRIBUTED BY HASH(col) + TDSQL_PARTITION BY RANGE(TDSQL_MONTH(col))（关键字大写、函数大写）
+//  4. 多条模板分区定义 + 复合主键 + 表选项串
+//
+// 表/列名一律用占位符（t_*, col_*, biz_date 等），不出现客户业务字段。
+func TestTDSQLDoc3CustomerCorpus(t *testing.T) {
+	cases := []struct {
+		name           string
+		sql            string
+		wantDist       bool
+		wantDistTp     model.PartitionType
+		wantTdsqlPart  bool
+		wantSubTp      model.PartitionType
+		wantTemplateLn int
+	}{
+		{
+			name: "shape1: HASH only",
+			sql: `CREATE TABLE t_corpus_1 (
+  id BIGINT(19) AUTO_INCREMENT NOT NULL COMMENT 'XXXX',
+  col_a VARCHAR(32) NOT NULL COMMENT 'XXXX',
+  col_b VARCHAR(64) NOT NULL COMMENT 'XXXX',
+  biz_date DATE NOT NULL COMMENT 'XXXX',
+  amount DECIMAL(38,2) NOT NULL COMMENT 'XXXX',
+  gmt_create DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'XXXX',
+  PRIMARY KEY (id, col_a)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT 'XXXX'
+  TDSQL_DISTRIBUTED BY HASH(col_a)`,
+			wantDist:   true,
+			wantDistTp: model.PartitionTypeHash,
+		},
+		{
+			name: "shape2: HASH + TDSQL_PARTITION BY RANGE(tdsql_day(col)), lowercase",
+			sql: `CREATE TABLE t_corpus_2 (
+  id BIGINT(19) AUTO_INCREMENT NOT NULL COMMENT 'XXXX',
+  col_a VARCHAR(32) NOT NULL COMMENT 'XXXX',
+  biz_date DATE NOT NULL COMMENT 'XXXX',
+  PRIMARY KEY (id, col_a, biz_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT 'XXXX'
+  tdsql_distributed by hash(col_a) tdsql_partition by range (tdsql_day (biz_date)) (
+    PARTITION p_auto_20260112 VALUES LESS THAN (20260113),
+    PARTITION p_auto_20260113 VALUES LESS THAN (20260114),
+    PARTITION p_auto_20260114 VALUES LESS THAN (20260115)
+  )`,
+			wantDist:       true,
+			wantDistTp:     model.PartitionTypeHash,
+			wantTdsqlPart:  true,
+			wantSubTp:      model.PartitionTypeRange,
+			wantTemplateLn: 3,
+		},
+		{
+			name: "shape3: HASH + TDSQL_PARTITION BY RANGE(TDSQL_MONTH(col)), uppercase",
+			sql: `CREATE TABLE T_CORPUS_3 (
+  ID BIGINT(19) AUTO_INCREMENT NOT NULL,
+  COL_A VARCHAR(6) NOT NULL,
+  COL_B VARCHAR(32) NOT NULL,
+  POST_DATE DATE NOT NULL,
+  PRIMARY KEY (ID, COL_A, POST_DATE)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+  TDSQL_DISTRIBUTED BY HASH(COL_A) TDSQL_PARTITION BY RANGE(TDSQL_MONTH(POST_DATE)) (
+    PARTITION P_AUTO_202601 VALUES LESS THAN (202602),
+    PARTITION P_AUTO_202602 VALUES LESS THAN (202603)
+  )`,
+			wantDist:       true,
+			wantDistTp:     model.PartitionTypeHash,
+			wantTdsqlPart:  true,
+			wantSubTp:      model.PartitionTypeRange,
+			wantTemplateLn: 2,
+		},
+		{
+			name: "shape4: full options + composite PK + 4 template partitions",
+			sql: `CREATE TABLE t_corpus_4 (
+  id BIGINT(19) AUTO_INCREMENT NOT NULL COMMENT 'XXXX',
+  col_a VARCHAR(32) NOT NULL COMMENT 'XXXX',
+  col_b VARCHAR(80) COMMENT 'XXXX',
+  col_c DECIMAL(20,8) COMMENT 'XXXX',
+  biz_date DATE NOT NULL DEFAULT '9999-12-31' COMMENT 'XXXX',
+  gmt_create DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'XXXX',
+  gmt_modified DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'XXXX',
+  PRIMARY KEY (id, col_a, biz_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT 'XXXX'
+  TDSQL_DISTRIBUTED BY HASH(col_a) TDSQL_PARTITION BY RANGE (tdsql_day (biz_date)) (
+    PARTITION p_auto_20260101 VALUES LESS THAN (20260102),
+    PARTITION p_auto_20260102 VALUES LESS THAN (20260103),
+    PARTITION p_auto_20260103 VALUES LESS THAN (20260104),
+    PARTITION p_auto_20260104 VALUES LESS THAN (20260105)
+  )`,
+			wantDist:       true,
+			wantDistTp:     model.PartitionTypeHash,
+			wantTdsqlPart:  true,
+			wantSubTp:      model.PartitionTypeRange,
+			wantTemplateLn: 4,
+		},
+	}
+
+	for _, ca := range cases {
+		t.Run(ca.name, func(t *testing.T) {
+			st, err := parser.New().ParseOneStmt(ca.sql, "", "")
+			if err != nil {
+				t.Fatalf("parse failed: %v\nsql: %s", err, ca.sql)
+			}
+			ct, ok := st.(*ast.CreateTableStmt)
+			if !ok {
+				t.Fatalf("not CreateTableStmt")
+			}
+
+			if ca.wantDist {
+				if ct.TdSqlDistributed == nil {
+					t.Fatalf("expected TdSqlDistributed != nil")
+				}
+				if ct.TdSqlDistributed.Tp != ca.wantDistTp {
+					t.Fatalf("dist Tp = %v, want %v", ct.TdSqlDistributed.Tp, ca.wantDistTp)
+				}
+			}
+
+			if ca.wantTdsqlPart {
+				if ct.Partition == nil || ct.Partition.Sub == nil {
+					t.Fatalf("expected TDSQL_PARTITION (Partition.Sub) populated")
+				}
+				if ct.Partition.Tp != 0 {
+					t.Fatalf("expected Partition.Tp == 0 for TDSQL_PARTITION-only, got %v", ct.Partition.Tp)
+				}
+				if ct.Partition.Sub.Tp != ca.wantSubTp {
+					t.Fatalf("sub Tp = %v, want %v", ct.Partition.Sub.Tp, ca.wantSubTp)
+				}
+				if got := len(ct.Partition.Sub.Template); got != ca.wantTemplateLn {
+					t.Fatalf("template len = %d, want %d", got, ca.wantTemplateLn)
+				}
+			} else if ct.Partition != nil && ct.Partition.Sub != nil {
+				t.Fatalf("did not expect TDSQL_PARTITION but got Sub: %+v", ct.Partition.Sub)
+			}
+
+			// round-trip：restore -> 再 parse 必须等价。
+			var b strings.Builder
+			if err := st.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &b)); err != nil {
+				t.Fatalf("restore failed: %v", err)
+			}
+			restored := b.String()
+			if ca.wantDist && !strings.Contains(strings.ToUpper(restored), "TDSQL_DISTRIBUTED") {
+				t.Fatalf("restored SQL missing TDSQL_DISTRIBUTED:\n%s", restored)
+			}
+			if ca.wantTdsqlPart && !strings.Contains(strings.ToUpper(restored), "TDSQL_PARTITION") {
+				t.Fatalf("restored SQL missing TDSQL_PARTITION:\n%s", restored)
+			}
+			if _, err := parser.New().ParseOneStmt(restored, "", ""); err != nil {
+				t.Fatalf("re-parse restored SQL failed: %v\nrestored: %s", err, restored)
+			}
+		})
+	}
+}

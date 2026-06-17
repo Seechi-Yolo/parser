@@ -5014,6 +5014,11 @@ type nodeTextCleaner struct {
 // Enter implements Visitor interface.
 func (checker *nodeTextCleaner) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
 	in.SetText("")
+	// Source line numbers are intentionally cleared so that round-trip
+	// comparisons (multi-line source vs single-line restored SQL) compare
+	// only semantic content, not the position metadata that necessarily
+	// differs after Restore.
+	in.SetStartLine(0)
 	switch node := in.(type) {
 	case *ast.CreateTableStmt:
 		for _, opt := range node.Options {
